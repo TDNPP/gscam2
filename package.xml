@@ -26,6 +26,7 @@
     <depend>camera_info_manager</depend>
     <depend>class_loader</depend>
     <depend>cv_bridge</depend>
+    <depend>h264_msgs</depend>
     <depend>libgstreamer1.0-dev</depend>
     <depend>libgstreamer-plugins-base1.0-dev</depend>
     <depend>rclcpp</depend>

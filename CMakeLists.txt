@@ -18,6 +18,7 @@ if ($ENV{CLION_IDE})
   find_package(fastrtps_cmake_module REQUIRED)
   set(FastRTPS_INCLUDE_DIR "/opt/ros/foxy/include")
   set(FastRTPS_LIBRARY_RELEASE "/opt/ros/foxy/lib/libfastrtps.so")
+  set(h264_msgs "${PROJECT_SOURCE_DIR}/../../../install/h264_msgs/share/h264_msgs/cmake")
   set(ros2_shared_DIR "${PROJECT_SOURCE_DIR}/../../../install/ros2_shared/share/ros2_shared/cmake")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DRUN_INSIDE_CLION")
 endif ()
@@ -31,6 +32,7 @@ find_package(ament_cmake REQUIRED)
 find_package(camera_calibration_parsers REQUIRED)
 find_package(camera_info_manager REQUIRED)
 find_package(class_loader REQUIRED)
+find_package(h264_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_components REQUIRED)
 find_package(rclpy REQUIRED)
@@ -54,6 +56,7 @@ set(GSCAM_NODE_DEPS
   camera_info_manager
   class_loader
   GST_APP
+  h264_msgs
   rclcpp
   rclcpp_components
   ros2_shared

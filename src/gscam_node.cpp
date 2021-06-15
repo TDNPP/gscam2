@@ -6,6 +6,7 @@ extern "C" {
 }
 
 #include "camera_info_manager/camera_info_manager.hpp"
+#include "h264_msgs/msg/packet.hpp"
 #include "ros2_shared/context_macros.hpp"
 #include "sensor_msgs/image_encodings.hpp"
 #include "sensor_msgs/msg/compressed_image.hpp"
@@ -69,8 +70,11 @@ namespace gscam2
     // Publish images...
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr camera_pub_;
 
-    // ... or compressed images
+    // ... or compressed images...
     rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr jpeg_pub_;
+
+    // ... or h264 packets
+    rclcpp::Publisher<h264_msgs::msg::Packet>::SharedPtr h264_pub_;
 
     // Publish camera info
     rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr cinfo_pub_;
@@ -152,6 +156,8 @@ namespace gscam2
                                  nullptr);
     } else if (cxt_.image_encoding_ == "jpeg") {
       caps = gst_caps_new_simple("image/jpeg", nullptr, nullptr);
+    } else if (cxt_.image_encoding_ == "h264") {
+      caps = gst_caps_new_simple("video/x-h264", nullptr, nullptr);
     }
 
     gst_app_sink_set_caps(GST_APP_SINK(sink_), caps);
@@ -219,6 +225,8 @@ namespace gscam2
     cinfo_pub_ = node_->create_publisher<sensor_msgs::msg::CameraInfo>("camera_info", 1);
     if (cxt_.image_encoding_ == "jpeg") {
       jpeg_pub_ = node_->create_publisher<sensor_msgs::msg::CompressedImage>("image_raw/compressed", 1);
+    } else if (cxt_.image_encoding_ == "h264") {
+      h264_pub_ = node_->create_publisher<h264_msgs::msg::Packet>("image_raw/h264", 1);
     } else {
       camera_pub_ = node_->create_publisher<sensor_msgs::msg::Image>("image_raw", 1);
     }
@@ -323,6 +331,26 @@ namespace gscam2
       std::copy(buf_data, (buf_data) + (buf_size), img->data.begin());
       jpeg_pub_->publish(std::move(img));
       cinfo_pub_->publish(std::move(cinfo));
+    } else if (cxt_.image_encoding_ == "h264") {
+      static int count = 0;
+      count++;
+      if (count % 60 == 0) {
+        std::cout << "h264 frames: " << count << std::endl;
+      }
+
+      std::cout << "buf " << count << ", [";
+      for (int i = 0; i < 10; ++i) {
+        std::cout << (int) buf_data[i] << ", ";
+      }
+      std::cout << "], size " << buf_size << std::endl;
+
+      auto img = std::make_unique<h264_msgs::msg::Packet>();
+      img->header = cinfo->header;
+      img->seq = count;
+      img->data.resize(buf_size);
+      std::copy(buf_data, (buf_data) + (buf_size), img->data.begin());
+      h264_pub_->publish(std::move(img));
+      cinfo_pub_->publish(std::move(cinfo));
     } else {
       // Complain if the returned buffer is smaller than we expect
       const unsigned int expected_frame_size =
@@ -402,7 +430,8 @@ namespace gscam2
 
     if (cxt_.image_encoding_ != sensor_msgs::image_encodings::RGB8 &&
         cxt_.image_encoding_ != sensor_msgs::image_encodings::MONO8 &&
-        cxt_.image_encoding_ != "jpeg") {
+        cxt_.image_encoding_ != "jpeg" &&
+        cxt_.image_encoding_ != "h264") {
       RCLCPP_FATAL(node_->get_logger(), "Unsupported image encoding: %s", cxt_.image_encoding_.c_str());
       return;
     }
