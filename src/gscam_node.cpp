@@ -157,6 +157,7 @@ namespace gscam2
     } else if (cxt_.image_encoding_ == "jpeg") {
       caps = gst_caps_new_simple("image/jpeg", nullptr, nullptr);
     } else if (cxt_.image_encoding_ == "h264") {
+      // TODO require "stream-format=byte-stream,alignment=au"
       caps = gst_caps_new_simple("video/x-h264", nullptr, nullptr);
     }
 
@@ -272,6 +273,24 @@ namespace gscam2
     }
   }
 
+  // Copy all memory segments in a GstBuffer into dest
+  void copy_buffer(GstBuffer *buffer, std::vector<unsigned char>& dest)
+  {
+    auto num_segments = gst_buffer_n_memory(buffer);
+    gsize copied = 0;
+    for (int i = 0; i < num_segments; ++i) {
+      GstMemory *segment = gst_buffer_get_memory(buffer, i);
+      GstMapInfo segment_info;
+      gst_memory_map(segment, &segment_info, GST_MAP_READ);
+
+      std::copy(segment_info.data, segment_info.data + segment_info.size, dest.begin() + (long) copied);
+      copied += segment_info.size;
+
+      gst_memory_unmap(segment, &segment_info);
+      gst_memory_unref(segment);
+    }
+  }
+
   void GSCamNode::impl::process_frame()
   {
     // This should block until a new frame is awake, this way, we'll run at the
@@ -279,32 +298,23 @@ namespace gscam2
     // TODO use timeout to handle the case where there's no data
     // RCLCPP_DEBUG(get_logger(), "Getting data...");
     GstSample *sample = gst_app_sink_pull_sample(GST_APP_SINK(sink_));
+
     if (!sample) {
       RCLCPP_ERROR(node_->get_logger(), "Could not get sample, pause for 1s");
       using namespace std::chrono_literals;
       std::this_thread::sleep_for(1s);
       return;
     }
-    GstBuffer *buf = gst_sample_get_buffer(sample);
-    GstMemory *memory = gst_buffer_get_memory(buf, 0);
-    GstMapInfo info;
 
-    gst_memory_map(memory, &info, GST_MAP_READ);
-    gsize &buf_size = info.size;
-    guint8 *&buf_data = info.data;
-    GstClockTime bt = gst_element_get_base_time(pipeline_);
-    // RCLCPP_INFO(get_logger(), "New buffer: timestamp %.6f %lu %lu %.3f",
-    //         GST_TIME_AS_USECONDS(buf->timestamp+bt)/1e6+time_offset_, buf->timestamp, bt, time_offset_);
+    GstBuffer *buffer = gst_sample_get_buffer(sample);
 
     // Stop on end of stream
-    if (!buf) {
+    if (!buffer) {
       RCLCPP_INFO(node_->get_logger(), "Stream ended, pause for 1s");
       using namespace std::chrono_literals;
       std::this_thread::sleep_for(1s);
       return;
     }
-
-    // RCLCPP_DEBUG(get_logger(), "Got data.");
 
     // Get the image width and height
     GstPad *pad = gst_element_get_static_pad(sink_, "sink");
@@ -313,79 +323,82 @@ namespace gscam2
     gst_structure_get_int(structure, "width", &width_);
     gst_structure_get_int(structure, "height", &height_);
 
-    // Update header information
     camera_info_manager::CameraInfo cur_cinfo = camera_info_manager_.getCameraInfo();
     auto cinfo = std::make_unique<sensor_msgs::msg::CameraInfo>(cur_cinfo);
+    cinfo->header.frame_id = cxt_.frame_id_;
+
+    // Gst vs ROS time
+    GstClockTime bt = gst_element_get_base_time(pipeline_);
     if (cxt_.use_gst_timestamps_) {
-      cinfo->header.stamp = rclcpp::Time(buf->pts + bt + time_offset_);
+      cinfo->header.stamp = rclcpp::Time(buffer->pts + bt + time_offset_);
     } else {
       cinfo->header.stamp = node_->now();
     }
-    // RCLCPP_INFO(get_logger(), "Image time stamp: %.3f",cinfo->header.stamp.toSec());
-    cinfo->header.frame_id = cxt_.frame_id_;
+
+    auto buffer_size = gst_buffer_get_size(buffer);
+
     if (cxt_.image_encoding_ == "jpeg") {
+      // image/jpeg
       auto img = std::make_unique<sensor_msgs::msg::CompressedImage>();
       img->header = cinfo->header;
       img->format = "jpeg";
-      img->data.resize(buf_size);
-      std::copy(buf_data, (buf_data) + (buf_size), img->data.begin());
+      img->data.resize(buffer_size);
+
+      copy_buffer(buffer, img->data);
+
       jpeg_pub_->publish(std::move(img));
       cinfo_pub_->publish(std::move(cinfo));
-    } else if (cxt_.image_encoding_ == "h264") {
-      static int count = 0;
-      count++;
-      if (count % 60 == 0) {
-        std::cout << "h264 frames: " << count << std::endl;
-      }
 
-      std::cout << "buf " << count << ", [";
-      for (int i = 0; i < 10; ++i) {
-        std::cout << (int) buf_data[i] << ", ";
+    } else if (cxt_.image_encoding_ == "h264") {
+      // video/x-h264
+      static int seq = 0;
+      seq++;
+      if (seq % 60 == 0) {
+        RCLCPP_DEBUG(node_->get_logger(), "%d h264 frames", seq);
       }
-      std::cout << "], size " << buf_size << std::endl;
 
       auto img = std::make_unique<h264_msgs::msg::Packet>();
       img->header = cinfo->header;
-      img->seq = count;
-      img->data.resize(buf_size);
-      std::copy(buf_data, (buf_data) + (buf_size), img->data.begin());
+      img->seq = seq;
+      img->data.resize(buffer_size);
+
+      copy_buffer(buffer, img->data);
+
       h264_pub_->publish(std::move(img));
       cinfo_pub_->publish(std::move(cinfo));
+
     } else {
+      // image/x-raw
+
       // Complain if the returned buffer is smaller than we expect
       const unsigned int expected_frame_size =
         cxt_.image_encoding_ == sensor_msgs::image_encodings::RGB8
         ? width_ * height_ * 3
         : width_ * height_;
 
-      if (buf_size < expected_frame_size) {
+      if (buffer_size < expected_frame_size) {
         RCLCPP_WARN(node_->get_logger(),
                     "Image buffer underflow: expected frame to be %d bytes but got only %d"
-                    " bytes (make sure frames are correctly encoded)", expected_frame_size, (buf_size));
+                    " bytes (make sure frames are correctly encoded)", expected_frame_size, buffer_size);
       }
 
-      // Construct Image message
       auto img = std::make_unique<sensor_msgs::msg::Image>();
-
       img->header = cinfo->header;
-
-      // Image data and metadata
       img->width = width_;
       img->height = height_;
       img->encoding = cxt_.image_encoding_;
       img->is_bigendian = false;
-      img->data.resize(expected_frame_size);
+      img->data.resize(buffer_size);
 
-      // Copy the image so we can free the buffer allocated by gstreamer
       if (cxt_.image_encoding_ == sensor_msgs::image_encodings::RGB8) {
+        // format=RGB
         img->step = width_ * 3;
       } else {
+        // format=GRAY8
         img->step = width_;
       }
-      std::copy(
-        buf_data,
-        (buf_data) + (buf_size),
-        img->data.begin());
+
+      copy_buffer(buffer, img->data);
 
 #undef SHOW_ADDRESS
 #ifdef SHOW_ADDRESS
@@ -399,8 +412,6 @@ namespace gscam2
     }
 
     // Release the buffer
-    gst_memory_unmap(memory, &info);
-    gst_memory_unref(memory);
     gst_sample_unref(sample);
   }
 
